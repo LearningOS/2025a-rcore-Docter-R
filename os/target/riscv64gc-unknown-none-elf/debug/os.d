@@ -1,0 +1,1 @@
+/home/Zhang/rust_exercise/2025a-rcore-Docter-R/os/target/riscv64gc-unknown-none-elf/debug/os: /home/Zhang/rust_exercise/2025a-rcore-Docter-R/os/src/lang_items.rs /home/Zhang/rust_exercise/2025a-rcore-Docter-R/os/src/main.rs
