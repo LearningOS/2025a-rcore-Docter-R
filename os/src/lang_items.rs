@@ -1,4 +1,6 @@
 //! The panic handler
+//! 
+//! 打印出错位置和原因并杀死当前应用
 
 use crate::sbi::shutdown;
 use core::panic::PanicInfo;
