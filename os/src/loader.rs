@@ -49,9 +49,14 @@ impl UserStack {
 }
 
 /// Get base address of app i.
+//  const APP_BASE_ADDRESS: usize = 0x80400000;
+//  const APP_SIZE_LIMIT: usize = 0x20000;
+//  由此可见，第一个任务的存放地址为 0x80400000，第二个任务的存放地址为 0x80420000，依次类推
+// 函数返回值只是地址，交给后面的加载函数去加载任务函数
 fn get_base_i(app_id: usize) -> usize {
     APP_BASE_ADDRESS + app_id * APP_SIZE_LIMIT
 }
+
 
 /// Get the total number of applications.
 pub fn get_num_app() -> usize {
@@ -70,6 +75,7 @@ pub fn load_apps() {
     let num_app_ptr = _num_app as usize as *const usize;
     let num_app = get_num_app();
     let app_start = unsafe { core::slice::from_raw_parts(num_app_ptr.add(1), num_app + 1) };
+    // 切片就是复杂版的指针或者数组。app_start 可以看作一个数组，但比数组多了指向内存空间的长度等。
     // load apps
     for i in 0..num_app {
         let base_i = get_base_i(i);
@@ -77,11 +83,14 @@ pub fn load_apps() {
         (base_i..base_i + APP_SIZE_LIMIT)
             .for_each(|addr| unsafe { (addr as *mut u8).write_volatile(0) });
         // load app from data section to memory
+        // src是app_start的第i个。
+        // src 是一个切片，表示从 app_start[i] 开始，长度为 app_start[i + 1] - app_start[i] 的一段内存
         let src = unsafe {
             core::slice::from_raw_parts(app_start[i] as *const u8, app_start[i + 1] - app_start[i])
         };
+        
         let dst = unsafe { core::slice::from_raw_parts_mut(base_i as *mut u8, src.len()) };
-        dst.copy_from_slice(src);
+        dst.copy_from_slice(src); //把src加载到dst所在的地址（base_i开始，长度同src(即任务的长度)）上了
     }
     // Memory fence about fetching the instruction memory
     // It is guaranteed that a subsequent instruction fetch must

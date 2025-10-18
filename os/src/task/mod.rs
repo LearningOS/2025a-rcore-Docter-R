@@ -9,6 +9,8 @@
 //! Be careful when you see `__switch` ASM function in `switch.S`. Control flow around this function
 //! might not be what you expect.
 
+use core::ops::AddAssign;
+
 mod context;
 mod switch;
 #[allow(clippy::module_inception)]
@@ -19,9 +21,13 @@ use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use lazy_static::*;
 use switch::__switch;
+
+use alloc::collections::BTreeMap; // 引入系统调用统计所需的 BTreeMap
+
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -51,10 +57,11 @@ lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
-        let mut tasks = [TaskControlBlock {
+        let mut tasks = core::array::from_fn(|_| TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
-        }; MAX_APP_NUM];
+            syscall_stats: BTreeMap::new(),
+        });
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
@@ -135,6 +142,24 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    // 本人自己加的
+    /// 记录当前任务的系统调用
+    fn record_syscall(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &mut inner.tasks[current];
+        task.syscall_stats.entry(syscall_id).or_insert(0).add_assign(1);
+        drop(inner);
+    }
+
+    // 返回当前任务的系统调用统计
+    fn get_current_syscall_stats(&self) -> BTreeMap<usize, usize> {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &inner.tasks[current];
+        task.syscall_stats.clone()
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +193,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// 记录当前任务的系统调用
+pub fn record_syscall(syscall_id: usize) {
+    TASK_MANAGER.record_syscall(syscall_id);
+}
+
+/// 获取当前任务的系统调用统计
+pub fn get_current_syscall_stats() -> BTreeMap<usize, usize> {
+    TASK_MANAGER.get_current_syscall_stats()
 }
