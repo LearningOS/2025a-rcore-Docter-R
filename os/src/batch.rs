@@ -142,10 +142,13 @@ pub fn run_next_app() -> ! {
     // before this we have to drop local variables related to resources manually
     // and release the resources
     extern "C" {
-        fn __restore(cx_addr: usize); //出栈
+        fn __restore(cx_addr: usize); // 声明外部函数__restore
     }
+    // KERNEL_STACK.push_context压栈，应用启动所需的 “初始状态”（TrapContext）存入内核栈
+    // 返回上下文信息（应用启动所需的 “初始状态”）TrapContext::app_init_context
+    // _restore出栈恢复上下文，并跳转到用户态应用程序
     unsafe { 
-        __restore(KERNEL_STACK.push_context(TrapContext::app_init_context( // 压栈
+        __restore(KERNEL_STACK.push_context(TrapContext::app_init_context( 
             APP_BASE_ADDRESS,
             USER_STACK.get_sp(),
         )) as *const _ as usize);
