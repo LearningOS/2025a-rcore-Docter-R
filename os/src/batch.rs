@@ -87,7 +87,7 @@ impl AppManager {
         // Therefore, fence.i must be executed after we have loaded
         // the code of the next app into the instruction memory.
         // See also: riscv non-priv spec chapter 3, 'Zifencei' extension.
-        asm!("fence.i");
+        asm!("fence.i");  //用于指令内存修改后同步的关键指令，确保处理器执行的是最新的指令，避免因缓存或流水线优化导致的不一致问题
     }
 
     pub fn get_current_app(&self) -> usize {
@@ -142,10 +142,10 @@ pub fn run_next_app() -> ! {
     // before this we have to drop local variables related to resources manually
     // and release the resources
     extern "C" {
-        fn __restore(cx_addr: usize);
+        fn __restore(cx_addr: usize); //出栈
     }
-    unsafe {
-        __restore(KERNEL_STACK.push_context(TrapContext::app_init_context(
+    unsafe { 
+        __restore(KERNEL_STACK.push_context(TrapContext::app_init_context( // 压栈
             APP_BASE_ADDRESS,
             USER_STACK.get_sp(),
         )) as *const _ as usize);
