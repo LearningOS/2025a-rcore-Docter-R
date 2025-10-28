@@ -34,7 +34,7 @@ impl Debug for FrameTracker {
 
 impl Drop for FrameTracker {
     fn drop(&mut self) {
-        frame_dealloc(self.ppn);
+        frame_dealloc(self.ppn);  // 进入recycle,本质上就是回收
     }
 }
 
@@ -114,7 +114,7 @@ pub fn frame_alloc() -> Option<FrameTracker> {
 
 /// Deallocate a physical page frame with a given ppn
 pub fn frame_dealloc(ppn: PhysPageNum) {
-    FRAME_ALLOCATOR.exclusive_access().dealloc(ppn);
+    FRAME_ALLOCATOR.exclusive_access().dealloc(ppn); // 进入recycle,本质上就是回收
 }
 
 #[allow(unused)]

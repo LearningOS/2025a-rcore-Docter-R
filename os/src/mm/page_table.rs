@@ -74,8 +74,8 @@ impl PageTableEntry {
 
 /// page table structure
 pub struct PageTable {
-    root_ppn: PhysPageNum,
-    frames: Vec<FrameTracker>,
+    root_ppn: PhysPageNum,  // 页表根节点的物理页号
+    frames: Vec<FrameTracker>,   // 页表所占用的所有物理页帧
 }
 
 /// Assume that it won't oom when creating/mapping.

@@ -96,7 +96,7 @@ impl From<VirtPageNum> for usize {
 impl VirtAddr {
     /// Get the (floor) virtual page number
     pub fn floor(&self) -> VirtPageNum {
-        VirtPageNum(self.0 / PAGE_SIZE)
+        VirtPageNum(self.0 / PAGE_SIZE)  // self.0就是取出usize数据类型的。两个整数除法自动舍去小数位
     }
 
     /// Get the (ceil) virtual page number
@@ -128,7 +128,7 @@ impl From<VirtPageNum> for VirtAddr {
 impl PhysAddr {
     /// Get the (floor) physical page number
     pub fn floor(&self) -> PhysPageNum {
-        PhysPageNum(self.0 / PAGE_SIZE)
+        PhysPageNum(self.0 / PAGE_SIZE) // self.0就是取出usize数据类型的。两个整数除法自动舍去小数位
     }
     /// Get the (ceil) physical page number
     pub fn ceil(&self) -> PhysPageNum {
