@@ -5,6 +5,9 @@ use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
 use crate::trap::{trap_handler, TrapContext};
+// 本人添加
+use alloc::collections::BTreeMap;
+
 
 /// The task control block (TCB) of a task.
 pub struct TaskControlBlock {
@@ -28,6 +31,9 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// 本人添加：系统调用统计（键：系统调用编号，值：调用次数）
+    pub syscall_stats: BTreeMap<usize, usize>,
 }
 
 impl TaskControlBlock {
@@ -96,6 +102,7 @@ impl TaskControlBlock {
             None
         }
     }
+
 }
 
 #[derive(Copy, Clone, PartialEq)]

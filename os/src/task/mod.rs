@@ -153,6 +153,23 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    // 本人自己加的
+    /// 记录当前任务的系统调用
+    fn record_syscall(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &mut inner.tasks[current];
+        task.syscall_stats.entry(syscall_id).or_insert(0).add_assign(1);
+        drop(inner);
+    }
+    // 返回当前任务的系统调用统计
+    fn get_current_syscall_stats(&self) -> BTreeMap<usize, usize> {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &inner.tasks[current];
+        task.syscall_stats.clone()
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +218,15 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+
+/// 记录当前任务的系统调用
+pub fn record_syscall(syscall_id: usize) {
+    TASK_MANAGER.record_syscall(syscall_id);
+}
+
+/// 获取当前任务的系统调用统计
+pub fn get_current_syscall_stats() -> BTreeMap<usize, usize> {
+    TASK_MANAGER.get_current_syscall_stats()
 }
