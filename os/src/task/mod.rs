@@ -21,6 +21,8 @@ use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
+//本人自己加的
+use core::ops::AddAssign;
 
 pub use context::TaskContext;
 

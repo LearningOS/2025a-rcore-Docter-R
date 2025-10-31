@@ -1,7 +1,8 @@
 //! Process management syscalls
-use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next,current_user_token};
+use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next,current_user_token,get_current_syscall_stats};
 use crate::timer::get_time_us;
-use crate::mm::{PageTable,translated_and_write};
+use crate::mm::{PageTable,translated_and_write,VirtAddr,frame_alloc,PTEFlags};
+use crate::config::{PAGE_SIZE,USER_SPACE_END};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -52,22 +53,181 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 
 /// TODO: Finish sys_trace to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
-pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
+pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    // 1. 为内核空间获取当前任务的根页表
+    let page_table_token = current_user_token();
+    let page_table = PageTable::from_token(page_table_token);
+
+    // 2. 将用户态指针转为虚拟地址（usize）
+    let id_start = id; 
+    let va = VirtAddr::from(id_start);
+    let vpn = va.floor(); // 当前虚拟页号（向下对齐到页边界）
+    let page_offset = va.page_offset(); // 页内偏移（0 ~ 页大小-1）
+
+
+    match trace_request {
+        0 => {
+            // set mask
+            // 翻译虚拟页到物理页：检查地址有效性和写权限
+            let pte = match page_table.translate(vpn) {
+                Some(pte) => pte,
+                None => return -1, // 虚拟地址无效，返回失败
+            };
+            if !pte.readable() { // 检查页表项是否有读权限
+                return -1; // 无写权限，返回失败
+            }
+            if !pte.user_visible() { // 检查页表项是否对用户可见
+                return -1; // 不可见，返回失败
+            }
+            let ppn = pte.ppn(); // 从页表项中提取物理页号（PPN）
+            ppn.get_bytes_array()[page_offset] as isize
+        }
+        1 => {
+            // get mask
+            // 翻译虚拟页到物理页：检查地址有效性和写权限
+            let pte = match page_table.translate(vpn) {
+                Some(pte) => pte,
+                None => return -1, // 虚拟地址无效，返回失败
+            };
+            if !pte.writable() { // 检查页表项是否有写权限
+                return -1; // 无写权限，返回失败
+            }
+            if !pte.user_visible() { // 检查页表项是否对用户可见
+                return -1; // 不可见，返回失败
+            }
+
+            let ppn = pte.ppn(); // 从页表项中提取物理页号（PPN）
+            ppn.get_bytes_array()[page_offset] = data as u8;
+            0 as isize
+        }
+        2 => {
+            // set name
+            get_current_syscall_stats().get(&id).cloned().unwrap_or(0) as isize
+            
+        }
+        _ => -1 as isize,
+    }
 }
 
 // YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
-    -1
+    
+    // 1. 校验start按页对齐（页大小为PAGE_SIZE，4KB为4096）
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+
+    // 2. 校验prot合法性：仅低3位有效，且至少有一个权限位
+    if (prot & !0x7) != 0 || (prot & 0x7) == 0 {
+        return -1;
+    }
+
+    // 3. 计算映射区间[start, end)，处理len=0的特殊情况
+    let end = if len == 0 { start } else { start + len };
+    // 校验区间不超出用户空间（避免映射内核地址）
+    if start >= USER_SPACE_END || end > USER_SPACE_END {
+        return -1;
+    }
+
+    // 4. 计算需要映射的页数（向上取整）
+    let num_pages = if len == 0 {
+        0
+    } else {
+        (len + PAGE_SIZE - 1) / PAGE_SIZE
+    };
+    if num_pages == 0 {
+        return 0; // 无实际映射，直接返回成功
+    }
+
+    // 5. 获取当前进程的页表（加锁保护，避免并发修改）
+    let page_table_token = current_user_token();
+    let mut page_table = PageTable::from_token(page_table_token);
+
+    // 6. 检查区间内是否已有映射（如有则返回错误）
+    let mut va = start;
+    while va < end {
+        let vpn = VirtAddr::from(va).floor(); // 虚拟页号（向下取整到页边界）
+        if page_table.translate(vpn).is_some() {
+            return -1; // 存在已映射的页，冲突
+        }
+        va += PAGE_SIZE;
+    }
+
+    // 7. 将prot转换为RISC-V页表项权限（关键：设置用户可见位PTE_U）
+    let mut flags = PTEFlags::V | PTEFlags::U; // 基础标志：有效+用户可见
+    if (prot & 0x1) != 0 { flags |= PTEFlags::R; } // prot第0位→读权限
+    if (prot & 0x2) != 0 { flags |= PTEFlags::W; } // prot第1位→写权限
+    if (prot & 0x4) != 0 { flags |= PTEFlags::X; } // prot第2位→执行权限
+
+    // 8. 分配物理页并建立映射（内存不足则返回错误）
+    va = start;
+    while va < end {
+        let vpn = VirtAddr::from(va).floor();
+        // 分配物理页（alloc_frame返回None表示内存不足）
+        let ppn = frame_alloc().unwrap().ppn;
+        // 建立虚拟页→物理页的映射（写入页表）
+        page_table.map(vpn, ppn, flags);
+        va += PAGE_SIZE;
+    }
+
+    0 // 成功返回0
 }
 
 // YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel: sys_munmap");
+        
+    // 1. 校验start按页对齐（虚拟内存最小单位是页）
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+
+    // 2. 计算映射区间[start, end)，处理len=0的特殊情况
+    let end = if len == 0 { start } else { start + len };
+    // 校验区间：不超出用户空间，且start <= end（避免无效区间）
+    if start > end || end > USER_SPACE_END {
+        return -1;
+    }
+
+    // 3. len=0时无实际操作，直接返回成功
+    if len == 0 {
+        return 0;
+    }
+
+    // 4. 获取当前进程的页表（加锁保护，避免并发修改页表导致数据竞争）
+    let page_table_token = current_user_token();
+    let mut page_table = PageTable::from_token(page_table_token);
+
+    let mut va = start;
+    // 合并「校验+回收+取消映射」为一次遍历（优化性能，减少冗余）
+    while va < end  {
+        let vpn = VirtAddr::from(va).floor(); // 虚拟页号（向下对齐到页边界）
+        
+        // 关键修改：仅处理已映射的页，未映射页直接跳过（不返回错误）
+        if let Some(pte) = page_table.translate(vpn) {
+            // 校验页合法性：必须是有效且用户可见的页
+            if !pte.is_valid() || !pte.user_visible() {
+                return -1; // 有效但非用户页，属于错误，返回-1
+            }
+            // 取消页表映射（清除PTE的V位）
+            page_table.unmap(vpn);
+        }
+
+        va += PAGE_SIZE; // 按页步长遍历下一页
+    }
+
+    // 5. 刷新TLB：确保CPU立即丢弃旧映射（避免访问已回收的物理页）
+    // 注意：sfence.vma 需确保操作的是当前进程的页表（通过current_user_token保证）
+    unsafe {
+        core::arch::asm!("sfence.vma x0, x0");
+        // a0=0 表示刷新所有虚拟地址，a1=0 表示使用当前页表（ASID=0，简化场景）
+    }
+
+    0 // 成功返回0
 }
+
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {
     trace!("kernel: sys_sbrk");
