@@ -3,6 +3,7 @@ use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current
 use crate::timer::get_time_us;
 use crate::mm::{PageTable,translated_and_write,VirtAddr,frame_alloc,PTEFlags};
 use crate::config::{PAGE_SIZE,USER_SPACE_END};
+use alloc::vec::Vec;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -110,9 +111,8 @@ pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     }
 }
 
-// YOUR JOB: Implement mmap.
 pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
-    trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
+    trace!("kernel: sys_mmap");
     
     // 1. 校验start按页对齐（页大小为PAGE_SIZE，4KB为4096）
     if start % PAGE_SIZE != 0 {
@@ -125,7 +125,7 @@ pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     }
 
     // 3. 计算映射区间[start, end)，处理len=0的特殊情况
-    let end = start + len ;
+    let end = start.checked_add(len).unwrap_or(usize::MAX);
     // 校验区间不超出用户空间（避免映射内核地址）
     if start >= USER_SPACE_END || end > USER_SPACE_END {
         return -1;
@@ -135,8 +135,8 @@ pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     if len == 0 {
         return 0;
     }
-    // println!("kernel: sys_mmap from {:#x} to {:#x}", start, end);
-    // 5. 获取当前进程的页表（加锁保护，避免并发修改）
+
+    // 5. 获取当前进程的页表
     let page_table_token = current_user_token();
     let mut page_table = PageTable::from_token(page_table_token);
 
@@ -145,51 +145,49 @@ pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     if (prot & 0x2) != 0 { flags |= PTEFlags::W; } // prot第1位→写权限
     if (prot & 0x4) != 0 { flags |= PTEFlags::X; } // prot第2位→执行权限
 
-    
     // 6. 检查区间内是否已有映射（如有则返回错误）
     let mut va = start;
     while va < end {
         let vpn = VirtAddr::from(va).floor(); // 虚拟页号（向下取整到页边界）
-        println!("kernel: sys_mmap mapping vpn {:#x}", vpn.0);
         
         if let Some(pte) = page_table.translate(vpn) {
-            // 核心修改：判断页面是否有效（检查PTE的有效位V是否置位）
-            if pte.is_valid() { // 关键：判断“页面是否valid”
+            // 判断页面是否有效（检查PTE的有效位V是否置位）
+            if pte.is_valid() {
                 return -1; // 存在已有效的映射页，冲突返回-1
-            }else {
-                // 页表项存在但无效，继续下一页检查
-                println!("kernel: PTE_flage = {:?}", pte.flags());
             }
-        }else {
-            // 页表项不存在，继续下一页检查
-            println!("kernel: PTE_flage = None");
-        }
-
-        // 分配物理页（alloc_frame返回None表示内存不足）
-        let ppn = frame_alloc().unwrap().ppn;
-
-        // 建立虚拟页→物理页的映射（写入页表）
-        page_table.map(vpn, ppn, flags);
-
-        if let Some(pte1) = page_table.translate(vpn) {
-            // 检查mmap之后标志位是否设置正常
-            println!("kernel: mmap_PTE_flage = {:#?}", pte1.flags());
-        }else {
-            // 页表项存在但无效，继续下一页检查
-            println!("kernel: mmap_PTE_flage = None");
         }
 
         va += PAGE_SIZE;
+    }
 
-        println!("kernel: va =  {:#x}", va);
-        println!("kernel: end = {:#x}", end);
+    // 7. 建立映射，处理内存分配失败
+    let mut va = start;
+    let mut mapped_pages = Vec::new(); // 记录已成功映射的页面，用于错误回滚
+    
+    while va < end {
+        let vpn = VirtAddr::from(va).floor();
         
+        // 分配物理页（处理内存不足情况）
+        if let Some(frame) = frame_alloc() {
+            let ppn = frame.ppn;
+            
+            // 建立虚拟页→物理页的映射
+            page_table.map(vpn, ppn, flags);
+            mapped_pages.push(vpn); // 记录成功映射的页面
+        } else {
+            // 内存不足，回滚已建立的映射
+            for mapped_vpn in mapped_pages {
+                page_table.unmap(mapped_vpn);
+            }
+            return -1;
+        }
+
+        va += PAGE_SIZE;
     }
 
     0 // 成功返回0
 }
 
-// YOUR JOB: Implement munmap.
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!("kernel: sys_munmap");
         
@@ -203,46 +201,40 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
         return 0;
     }
 
-    // 3. 计算映射区间[start, end)，处理len=0的特殊情况
-    let end = start + len ;
-    // 校验区间：不超出用户空间，且start <= end（避免无效区间）
+    // 3. 计算映射区间[start, end)
+    let end = start.checked_add(len).unwrap_or(usize::MAX);
+    // 校验区间：不超出用户空间
     if start > end || end > USER_SPACE_END {
         return -1;
     }
 
-    // 4. 获取当前进程的页表（加锁保护，避免并发修改页表导致数据竞争）
+    // 4. 获取当前进程的页表
     let page_table_token = current_user_token();
     let mut page_table = PageTable::from_token(page_table_token);
 
+    // 5. 首先检查整个区域是否都是已映射的
+    // 如果任何一页没有有效映射，则返回错误
     let mut va = start;
-    // 合并「校验+回收+取消映射」为一次遍历（优化性能，减少冗余）
-
-    while va < end  {
-        let vpn = VirtAddr::from(va).floor(); // 虚拟页号（向下对齐到页边界）
+    while va < end {
+        let vpn = VirtAddr::from(va).floor();
         
-        // 关键修改：仅处理已映射的页，未映射页直接跳过（不返回错误）
+        // 检查页面是否有效映射
         if let Some(pte) = page_table.translate(vpn) {
-            // 校验页合法性：必须是有效且用户可见的页
-            if !pte.user_visible() {
-                return -1; // 有效但非用户页，属于错误，返回-1
+            if !pte.is_valid() || !pte.user_visible() {
+                // 页面无效，返回错误
+                return -1;
+            }else {
+                page_table.unmap(vpn);
             }
-
-            // 取消页表映射（清除PTE的V位）
-            page_table.unmap(vpn);
-
-        }
-
-        va += PAGE_SIZE; // 按页步长遍历下一页
-
+        } 
+        va += PAGE_SIZE;
     }
 
-    // 5. 刷新TLB：确保CPU立即丢弃旧映射（避免访问已回收的物理页）
-    // 注意：sfence.vma 需确保操作的是当前进程的页表（通过current_user_token保证）
-    // unsafe {
-    //     core::arch::asm!("sfence.vma");
-    //     // a0=0 表示刷新所有虚拟地址，a1=0 表示使用当前页表（ASID=0，简化场景）
-    // }
 
+    // 7. 刷新TLB：确保CPU立即丢弃旧映射
+    unsafe {
+        core::arch::asm!("sfence.vma");
+    }
 
     0 // 成功返回0
 }
