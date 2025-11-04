@@ -1,7 +1,7 @@
 //! Process management syscalls
 use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next,current_user_token,get_current_syscall_stats};
 use crate::timer::get_time_us;
-use crate::mm::{PageTable,translated_and_write,VirtAddr,frame_alloc,PTEFlags};
+use crate::mm::{PageTable,translated_and_write,VirtAddr,frame_alloc,PTEFlags,frame_dealloc};
 use crate::config::{PAGE_SIZE,USER_SPACE_END};
 use alloc::vec::Vec;
 
@@ -114,24 +114,23 @@ pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
 pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     trace!("kernel: sys_mmap");
     
-    // 1. 校验start按页对齐（页大小为PAGE_SIZE，4KB为4096）
+    // 1. 校验start按页对齐
     if start % PAGE_SIZE != 0 {
         return -1;
     }
 
-    // 2. 校验prot合法性：仅低3位有效，且至少有一个权限位
+    // 2. 校验prot合法性
     if (prot & !0x7) != 0 || (prot & 0x7) == 0 {
         return -1;
     }
 
-    // 3. 计算映射区间[start, end)，处理len=0的特殊情况
+    // 3. 计算映射区间
     let end = start.checked_add(len).unwrap_or(usize::MAX);
-    // 校验区间不超出用户空间（避免映射内核地址）
     if start >= USER_SPACE_END || end > USER_SPACE_END {
         return -1;
     }
 
-    // 4. 计算需要映射的页数（向上取整）
+    // 4. 处理len=0的情况
     if len == 0 {
         return 0;
     }
@@ -140,42 +139,67 @@ pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     let page_table_token = current_user_token();
     let mut page_table = PageTable::from_token(page_table_token);
 
-    let mut flags = PTEFlags::V | PTEFlags::U; // 基础标志：有效+用户可见
-    if (prot & 0x1) != 0 { flags |= PTEFlags::R; } // prot第0位→读权限
-    if (prot & 0x2) != 0 { flags |= PTEFlags::W; } // prot第1位→写权限
-    if (prot & 0x4) != 0 { flags |= PTEFlags::X; } // prot第2位→执行权限
+    // 6. 设置权限标志
+    let mut flags = PTEFlags::V | PTEFlags::U;
+    if (prot & 0x1) != 0 { flags |= PTEFlags::R; }
+    if (prot & 0x2) != 0 { flags |= PTEFlags::W; }
+    if (prot & 0x4) != 0 { flags |= PTEFlags::X; }
 
-    // 6. 检查区间内是否已有映射（如有则返回错误）
+    // 7. 检查区间内是否已有映射
     let mut va = start;
     while va < end {
-        let vpn = VirtAddr::from(va).floor(); // 虚拟页号（向下取整到页边界）
+        let vpn = VirtAddr::from(va).floor();
         
         if let Some(pte) = page_table.translate(vpn) {
-            // 判断页面是否有效（检查PTE的有效位V是否置位）
             if pte.is_valid() {
-                return -1; // 存在已有效的映射页，冲突返回-1
+                return -1; // 已存在有效映射
             }
         }
-
         va += PAGE_SIZE;
     }
 
-    // 7. 建立映射，处理内存分配失败
+    // 8. 建立映射并验证
     let mut va = start;
-    let mut mapped_pages = Vec::new(); // 记录已成功映射的页面，用于错误回滚
+    let mut mapped_pages = Vec::new();
     
     while va < end {
         let vpn = VirtAddr::from(va).floor();
         
-        // 分配物理页（处理内存不足情况）
+        // 分配物理页
         if let Some(frame) = frame_alloc() {
             let ppn = frame.ppn;
             
-            // 建立虚拟页→物理页的映射
+            // 建立映射
             page_table.map(vpn, ppn, flags);
-            mapped_pages.push(vpn); // 记录成功映射的页面
+            
+            // 验证映射是否成功
+            if let Some(pte) = page_table.translate(vpn) {
+                if pte.is_valid() && pte.ppn() == ppn {
+                    // 映射成功，检查标志位
+                    let actual_flags = pte.flags();
+                    if actual_flags.contains(flags) {
+                        mapped_pages.push(vpn);
+                    } else {
+                        // 标志位不匹配，回滚
+                        println!("标志位不匹配: 期望 {:?}, 实际 {:?}", flags, actual_flags);
+                        page_table.unmap(vpn);
+                        break;
+                    }
+                } else {
+                    // 映射失败，回滚
+                    println!("映射失败: VPN {:#x}", vpn.0);
+                    page_table.unmap(vpn);
+                    break;
+                }
+            } else {
+                // 无法翻译，映射失败
+                println!("无法翻译 VPN: {:#x}", vpn.0);
+                frame_dealloc(ppn);
+                break;
+            }
         } else {
-            // 内存不足，回滚已建立的映射
+            // 内存不足
+            println!("内存不足，回滚已建立的映射");
             for mapped_vpn in mapped_pages {
                 page_table.unmap(mapped_vpn);
             }
@@ -185,26 +209,35 @@ pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
         va += PAGE_SIZE;
     }
 
+    // 9. 检查是否所有页面都成功映射
+    if mapped_pages.len() * PAGE_SIZE < len {
+        // 部分映射失败，回滚所有
+        println!("部分映射失败，回滚所有");
+        for mapped_vpn in mapped_pages {
+            page_table.unmap(mapped_vpn);
+        }
+        return -1;
+    }
+
     0 // 成功返回0
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!("kernel: sys_munmap");
         
-    // 1. 校验start按页对齐（虚拟内存最小单位是页）
+    // 1. 校验start按页对齐
     if start % PAGE_SIZE != 0 {
         return -1;
     }
 
-    // 2. len=0时无实际操作，直接返回成功
+    // 2. len=0时无实际操作
     if len == 0 {
         return 0;
     }
 
-    // 3. 计算映射区间[start, end)
+    // 3. 计算映射区间
     let end = start.checked_add(len).unwrap_or(usize::MAX);
-    // 校验区间：不超出用户空间
-    if start > end || end > USER_SPACE_END {
+    if end > USER_SPACE_END {
         return -1;
     }
 
@@ -212,26 +245,42 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     let page_table_token = current_user_token();
     let mut page_table = PageTable::from_token(page_table_token);
 
-    // 5. 首先检查整个区域是否都是已映射的
-    // 如果任何一页没有有效映射，则返回错误
+let mut va = start;
+    while va < end {
+        let vpn = VirtAddr::from(va).floor();
+        
+        // 检查页面是否存在有效映射
+        if let Some(pte) = page_table.translate(vpn) {
+            // 只检查页面是否有效，不检查用户可见性
+            if !pte.is_valid() {
+                return -1;
+            }
+            // 如果页面无效，静默跳过
+        }
+        // 如果页面没有映射（translate返回None），也静默跳过
+        
+        va += PAGE_SIZE;
+    }
+
+    // 5. 遍历区域，只取消已存在的有效映射
     let mut va = start;
     while va < end {
         let vpn = VirtAddr::from(va).floor();
         
-        // 检查页面是否有效映射
+        // 检查页面是否存在有效映射
         if let Some(pte) = page_table.translate(vpn) {
-            if !pte.is_valid() || !pte.user_visible() {
-                // 页面无效，返回错误
-                return -1;
-            }else {
+            // 只检查页面是否有效，不检查用户可见性
+            if pte.is_valid() {
                 page_table.unmap(vpn);
             }
-        } 
+            // 如果页面无效，静默跳过
+        }
+        // 如果页面没有映射（translate返回None），也静默跳过
+        
         va += PAGE_SIZE;
     }
 
-
-    // 7. 刷新TLB：确保CPU立即丢弃旧映射
+    // 6. 刷新TLB
     unsafe {
         core::arch::asm!("sfence.vma");
     }
