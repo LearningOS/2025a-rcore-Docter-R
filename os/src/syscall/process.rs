@@ -1,9 +1,8 @@
 //! Process management syscalls
-use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next,current_user_token,get_current_syscall_stats};
+use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next,current_user_token,get_current_syscall_stats,sys_mmap_tcb,sys_munmap_tcb};
 use crate::timer::get_time_us;
-use crate::mm::{PageTable,translated_and_write,VirtAddr,frame_alloc,PTEFlags,frame_dealloc};
+use crate::mm::{PageTable,translated_and_write,VirtAddr};
 use crate::config::{PAGE_SIZE,USER_SPACE_END};
-use alloc::vec::Vec;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -135,91 +134,8 @@ pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
         return 0;
     }
 
-    // 5. 获取当前进程的页表
-    let page_table_token = current_user_token();
-    let mut page_table = PageTable::from_token(page_table_token);
-
-    // 6. 设置权限标志
-    let mut flags = PTEFlags::V | PTEFlags::U;
-    if (prot & 0x1) != 0 { flags |= PTEFlags::R; }
-    if (prot & 0x2) != 0 { flags |= PTEFlags::W; }
-    if (prot & 0x4) != 0 { flags |= PTEFlags::X; }
-
-    // 7. 检查区间内是否已有映射
-    let mut va = start;
-    while va < end {
-        let vpn = VirtAddr::from(va).floor();
-        
-        if let Some(pte) = page_table.translate(vpn) {
-            if pte.is_valid() {
-                return -1; // 已存在有效映射
-            }
-        }
-        va += PAGE_SIZE;
-    }
-
-    // 8. 建立映射并验证
-    let mut va = start;
-    let mut mapped_pages = Vec::new();
-    
-    while va < end {
-        let vpn = VirtAddr::from(va).floor();
-        
-        // 分配物理页
-        if let Some(frame) = frame_alloc() {
-            let ppn = frame.ppn;
-            
-            // 建立映射
-            page_table.map(vpn, ppn, flags);
-            
-            // 验证映射是否成功
-            if let Some(pte) = page_table.translate(vpn) {
-                if pte.is_valid() && pte.ppn() == ppn {
-                    // 映射成功，检查标志位
-                    let actual_flags = pte.flags();
-                    if actual_flags.contains(flags) {
-                        mapped_pages.push(vpn);
-                    } else {
-                        // 标志位不匹配，回滚
-                        println!("标志位不匹配: 期望 {:?}, 实际 {:?}", flags, actual_flags);
-                        page_table.unmap(vpn);
-                        break;
-                    }
-                } else {
-                    // 映射失败，回滚
-                    println!("映射失败: VPN {:#x}", vpn.0);
-                    page_table.unmap(vpn);
-                    break;
-                }
-            } else {
-                // 无法翻译，映射失败
-                println!("无法翻译 VPN: {:#x}", vpn.0);
-                frame_dealloc(ppn);
-                break;
-            }
-        } else {
-            // 内存不足
-            println!("内存不足，回滚已建立的映射");
-            for mapped_vpn in mapped_pages {
-                page_table.unmap(mapped_vpn);
-            }
-            return -1;
-        }
-
-        va += PAGE_SIZE;
-    }
-
-    // 9. 检查是否所有页面都成功映射
-    if mapped_pages.len() * PAGE_SIZE < len {
-        // 部分映射失败，回滚所有
-        println!("部分映射失败，回滚所有");
-        for mapped_vpn in mapped_pages {
-            page_table.unmap(mapped_vpn);
-        }
-        return -1;
-    }
-
-    0 // 成功返回0
+    // 5. 建立映射并验证
+    sys_mmap_tcb(start, len, prot)
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
@@ -241,51 +157,8 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
         return -1;
     }
 
-    // 4. 获取当前进程的页表
-    let page_table_token = current_user_token();
-    let mut page_table = PageTable::from_token(page_table_token);
-
-let mut va = start;
-    while va < end {
-        let vpn = VirtAddr::from(va).floor();
-        
-        // 检查页面是否存在有效映射
-        if let Some(pte) = page_table.translate(vpn) {
-            // 只检查页面是否有效，不检查用户可见性
-            if !pte.is_valid() {
-                return -1;
-            }
-            // 如果页面无效，静默跳过
-        }
-        // 如果页面没有映射（translate返回None），也静默跳过
-        
-        va += PAGE_SIZE;
-    }
-
-    // 5. 遍历区域，只取消已存在的有效映射
-    let mut va = start;
-    while va < end {
-        let vpn = VirtAddr::from(va).floor();
-        
-        // 检查页面是否存在有效映射
-        if let Some(pte) = page_table.translate(vpn) {
-            // 只检查页面是否有效，不检查用户可见性
-            if pte.is_valid() {
-                page_table.unmap(vpn);
-            }
-            // 如果页面无效，静默跳过
-        }
-        // 如果页面没有映射（translate返回None），也静默跳过
-        
-        va += PAGE_SIZE;
-    }
-
-    // 6. 刷新TLB
-    unsafe {
-        core::arch::asm!("sfence.vma");
-    }
-
-    0 // 成功返回0
+    // 4. 遍历区域，只取消已存在的有效映射
+    sys_munmap_tcb(start, len)
 }
 
 /// change data segment size

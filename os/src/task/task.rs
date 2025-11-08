@@ -4,10 +4,11 @@ use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
+
 use crate::trap::{trap_handler, TrapContext};
 // 本人添加
 use alloc::collections::BTreeMap;
-
+use crate::mm::MapType;
 
 /// The task control block (TCB) of a task.
 pub struct TaskControlBlock {
@@ -104,6 +105,38 @@ impl TaskControlBlock {
         }
     }
 
+    /// 在当前任务的页表中映射一段虚拟地址区域
+    pub fn sys_mmap_tcb(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        let va_start = VirtAddr::from(start);
+        let va_end = VirtAddr::from(start + len);
+        
+        // 设置权限标志
+        let mut perm = MapPermission::empty();
+        perm.insert(MapPermission::U); // User mode access
+        if (prot & 0x1) != 0 { perm.insert(MapPermission::R); } // Read
+        if (prot & 0x2) != 0 { perm.insert(MapPermission::W); } // Write  
+        if (prot & 0x4) != 0 { perm.insert(MapPermission::X); } // Execute
+        
+        // 通过 MemorySet 的公共接口操作
+        if self.memory_set.mmap(va_start, va_end, MapType::Framed, perm) {
+            0 // 成功
+        } else {
+            -1 // 失败（通常是重叠）
+        }
+    }
+
+    /// 在当前任务的页表中取消映射一段虚拟地址区域
+    pub fn sys_munmap_tcb(&mut self, start: usize, len: usize) -> isize {
+        let va_start = VirtAddr::from(start);
+        let va_end = VirtAddr::from(start + len);
+        
+        // 通过 MemorySet 的公共接口操作
+        if self.memory_set.munmap(va_start, va_end) {
+            0 // 成功
+        } else {
+            -1 // 失败（区域不存在）
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]

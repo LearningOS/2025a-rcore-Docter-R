@@ -174,6 +174,20 @@ impl TaskManager {
         let task = &inner.tasks[current];
         task.syscall_stats.clone()
     }
+
+    fn sys_mmap_tcb(&self, start: usize, len: usize, prot: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &mut inner.tasks[current];
+        task.sys_mmap_tcb(start, len, prot)
+    }
+
+    fn sys_munmap_tcb(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let task = &mut inner.tasks[current];
+        task.sys_munmap_tcb(start, len)
+    }
 }
 
 /// Run the first task in task list.
@@ -233,4 +247,14 @@ pub fn record_syscall(syscall_id: usize) {
 /// 获取当前任务的系统调用统计
 pub fn get_current_syscall_stats() -> BTreeMap<usize, usize> {
     TASK_MANAGER.get_current_syscall_stats()
+}
+
+/// 在当前任务的页表中映射一段虚拟地址区域
+pub fn sys_mmap_tcb(start: usize, len: usize, prot: usize) -> isize {
+    TASK_MANAGER.sys_mmap_tcb(start, len, prot)
+}
+
+/// 在当前任务的页表中取消映射一段虚拟地址区域
+pub fn sys_munmap_tcb(start: usize, len: usize) -> isize {
+    TASK_MANAGER.sys_munmap_tcb(start, len)
 }
