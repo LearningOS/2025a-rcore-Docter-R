@@ -21,3 +21,5 @@ pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 pub const CLOCK_FREQ: usize = 12500000;
 /// the physical memory end
 pub const MEMORY_END: usize = 0x88000000;
+/// 用户态虚拟地址上限
+pub const USER_SPACE_END: usize = 0x80000000; 

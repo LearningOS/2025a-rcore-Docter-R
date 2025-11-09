@@ -24,7 +24,7 @@ mod task;
 use crate::loader::get_app_data_by_name;
 use alloc::sync::Arc;
 use lazy_static::*;
-pub use manager::{fetch_task, TaskManager};
+pub use manager::{fetch_task, TaskManager, sys_mmap_tcb, sys_munmap_tcb};
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 

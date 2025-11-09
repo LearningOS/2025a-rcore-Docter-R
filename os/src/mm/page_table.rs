@@ -8,13 +8,21 @@ use bitflags::*;
 bitflags! {
     /// page table entry flags
     pub struct PTEFlags: u8 {
+        /// valid
         const V = 1 << 0;
+        /// readable
         const R = 1 << 1;
+        /// writable
         const W = 1 << 2;
+        /// executable
         const X = 1 << 3;
+        /// user
         const U = 1 << 4;
+        /// global
         const G = 1 << 5;
+        /// accessed
         const A = 1 << 6;
+        /// dirty
         const D = 1 << 7;
     }
 }
@@ -212,4 +220,64 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .translate_va(VirtAddr::from(va))
         .unwrap()
         .get_mut()
+}
+
+/// 功能：从起始虚拟地址 `current` 到结束虚拟地址 `ts_va_end`（左闭右开），
+/// 借助传入的页表 `page_table` 完成虚拟地址到物理地址的翻译，
+/// 并将 `time_val_bytes` 中的数据写入对应物理内存；
+/// 自动处理跨页写入场景，拆分数据到对应物理页。
+/// 
+/// # 参数
+/// - `current`: 写入的起始虚拟地址（ usize 类型，需确保在合法地址空间内）
+/// - `ts_va_end`: 写入的结束虚拟地址（ usize 类型，不包含此地址，作为范围上限）
+/// - `page_table`: 用于地址翻译的页表引用（&PageTable，需提前初始化并包含合法页表项）
+/// - `time_val_bytes`: 待写入的原始数据切片（&[u8]，数据长度需匹配地址范围大小，避免越界）
+/// 
+/// # 返回值
+/// - 成功值
+/// - 成功：返回 `0`（数据已完整写入对应物理内存）
+/// - 失败：返回 `-1`（触发以下任一情况：虚拟地址翻译失败、目标页无写权限）
+/// 
+/// # 注意事项
+/// 1. 依赖 `VirtAddr::floor()`/`page_offset()` 正确拆分虚拟地址，`PageTable::translate()` 正确翻译页表项
+/// 2. 依赖 `ppn.get_bytes_array()` 能返回物理页的可变字节切片（内核需提前实现此方法）
+pub fn translated_and_write(current: usize, ts_va_end: usize, page_table: &PageTable, time_val_bytes: &[u8]) -> isize {
+    let mut data_offset = 0; // 已写入的字节偏移（处理跨页情况）
+    let mut current_va = current;
+    if current_va >= ts_va_end {
+        return -1; // 无数据写入，直接返回失败
+    }
+    while current_va < ts_va_end {
+    // 1 拆分当前虚拟页：获取虚拟页号（VPN）和页内偏移
+    let va = VirtAddr::from(current_va);
+    let mut vpn = va.floor(); // 当前虚拟页号（向下对齐到页边界）
+    let page_offset = va.page_offset(); // 页内偏移（0 ~ 页大小-1）
+
+    // 2 翻译虚拟页到物理页：检查地址有效性和写权限
+    let pte = match page_table.translate(vpn) {
+        Some(pte) => pte,
+        None => return -1, // 虚拟地址无效，返回失败
+    };
+    if !pte.writable() { // 检查页表项是否有写权限
+        return -1; // 无写权限，返回失败
+    }
+    let ppn = pte.ppn(); // 从页表项中提取物理页号（PPN）
+
+    // 3 计算当前页的写入范围（不超过页边界和结构体结束地址）
+    vpn.step(); // 下一个虚拟页号（当前页的结束边界）
+    let page_end_va: usize = VirtAddr::from(vpn).into(); // 当前页的结束虚拟地址
+    let write_end_va = page_end_va.min(ts_va_end); // 本次写入的结束地址（避免越界）
+    let write_len = write_end_va - current_va; // 本次写入的字节数
+
+    // 4 写入物理内存：通过物理页号获取可变切片，复制数据
+    let physical_page_slice = ppn.get_bytes_array(); // 物理页的可变字节切片（内核需实现该方法）
+    let dest_slice = &mut physical_page_slice[page_offset..page_offset + write_len]; // 目标物理地址范围
+    let src_slice = &time_val_bytes[data_offset..data_offset + write_len]; // 待写入的时间数据片段
+    dest_slice.copy_from_slice(src_slice); // 复制数据到物理内存
+
+    // 5 更新偏移，处理下一页（若有）
+    data_offset += write_len;
+    current_va = write_end_va;
+}
+    0
 }

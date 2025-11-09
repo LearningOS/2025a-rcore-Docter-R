@@ -300,6 +300,57 @@ impl MemorySet {
             false
         }
     }
+
+    // 新加的
+    /// 公共方法：检查地址范围是否重叠
+    pub fn check_overlap(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        for area in &self.areas {
+            let area_start: VirtAddr = area.vpn_range.get_start().into();
+            let area_end: VirtAddr = area.vpn_range.get_end().into();
+            if !(end <= area_start || start >= area_end) {
+                return true; // 有重叠
+            }
+        }
+        false // 无重叠
+    }
+
+    /// 公共方法：创建内存映射
+    pub fn mmap(&mut self, start: VirtAddr, end: VirtAddr, map_type: MapType, perm: MapPermission) -> bool {
+        // 检查重叠
+        if self.check_overlap(start, end) {
+            return false;
+        }
+        
+        // 创建映射区域
+        let map_area = MapArea::new(start, end, map_type, perm);
+        // 使用内部的 push 方法（保持 push 私有）
+        self.push(map_area, None);
+        true
+    }
+
+    /// 公共方法：取消内存映射
+    pub fn munmap(&mut self, start: VirtAddr, end: VirtAddr) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+        
+        // 查找要移除的区域
+        let mut found_index = None;
+        for (i, area) in self.areas.iter().enumerate() {
+            if area.vpn_range.get_start() == start_vpn && area.vpn_range.get_end() == end_vpn {
+                found_index = Some(i);
+                break;
+            }
+        }
+        
+        // 移除并取消映射
+        if let Some(index) = found_index {
+            let mut area = self.areas.remove(index);
+            area.unmap(&mut self.page_table);
+            true
+        } else {
+            false
+        }
+    }    
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -310,6 +361,7 @@ pub struct MapArea {
 }
 
 impl MapArea {
+    /// Create a new `MapArea`.
     pub fn new(
         start_va: VirtAddr,
         end_va: VirtAddr,
@@ -325,6 +377,7 @@ impl MapArea {
             map_perm,
         }
     }
+    /// Create a new `MapArea` from another one (without copying data frames).
     pub fn from_another(another: &Self) -> Self {
         Self {
             vpn_range: VPNRange::new(another.vpn_range.get_start(), another.vpn_range.get_end()),
@@ -333,6 +386,7 @@ impl MapArea {
             map_perm: another.map_perm,
         }
     }
+    /// map one page in this area
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
         match self.map_type {
@@ -348,23 +402,27 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
+    /// unmap one page in this area
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         if self.map_type == MapType::Framed {
             self.data_frames.remove(&vpn);
         }
         page_table.unmap(vpn);
     }
+    /// map all pages in this area
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
         }
     }
+    /// unmap all pages in this area
     pub fn unmap(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.unmap_one(page_table, vpn);
         }
     }
     #[allow(unused)]
+    /// shrink the area to new_end
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
             self.unmap_one(page_table, vpn)
@@ -372,6 +430,7 @@ impl MapArea {
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
     #[allow(unused)]
+    /// append the area to new_end
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
             self.map_one(page_table, vpn)
@@ -405,7 +464,9 @@ impl MapArea {
 #[derive(Copy, Clone, PartialEq, Debug)]
 /// map type for memory set: identical or framed
 pub enum MapType {
+    /// identity mapping
     Identical,
+    /// mapping with allocated frames
     Framed,
 }
 
