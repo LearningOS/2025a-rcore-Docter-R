@@ -12,6 +12,8 @@ use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
 
+use crate::task::add_task;
+
 /// Processor management structure
 pub struct Processor {
     ///The task currently executing on the current processor
@@ -104,6 +106,17 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     let mut processor = PROCESSOR.exclusive_access();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+    // 将当前任务放回就绪队列（如果它还是可运行的）
+    if let Some(current) = &processor.current {
+        let mut inner = current.inner_exclusive_access();
+        if inner.task_status == TaskStatus::Running {
+            inner.task_status = TaskStatus::Ready;
+            drop(inner);
+            
+            // 将任务重新加入就绪队列
+            add_task(current.clone());
+        }
+    }
     drop(processor);
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);

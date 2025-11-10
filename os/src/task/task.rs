@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use core::cell::RefMut;
 use crate::mm::MapPermission;
 use crate::mm::memory_set::MapType; // 添加这行导入
+use crate::task::BIG_STRIDE;
 
 /// Task control block structure
 ///
@@ -70,6 +71,14 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// stride 调度算法相关字段
+    /// 步长值、优先级
+    pub stride: usize,    
+    // 步长值  
+    pub pass: usize,        
+    // 优先级
+    pub priority: usize,    
 }
 
 impl TaskControlBlockInner {
@@ -137,7 +146,9 @@ impl TaskControlBlock {
         let pid_handle = pid_alloc();
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
-        // push a task context which goes to trap_return to the top of kernel stack
+        let priority = 16; // 默认优先级
+        let pass = BIG_STRIDE / priority; // 计算步长
+        
         let task_control_block = Self {
             pid: pid_handle,
             kernel_stack,
@@ -153,6 +164,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    // 初始化 stride 相关字段
+                    stride: 0,
+                    pass,
+                    priority,
                 })
             },
         };
@@ -211,6 +226,12 @@ impl TaskControlBlock {
         let pid_handle = pid_alloc();
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
+        
+        // 从父进程继承 stride 相关字段
+        let stride = 0; // 子进程初始 stride 为 0
+        let pass = parent_inner.pass;
+        let priority = parent_inner.priority;
+        
         let task_control_block = Arc::new(TaskControlBlock {
             pid: pid_handle,
             kernel_stack,
@@ -226,6 +247,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    // 添加缺失的 stride 相关字段
+                    stride,
+                    pass, 
+                    priority,
                 })
             },
         });
@@ -298,6 +323,11 @@ impl TaskControlBlock {
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
         
+        // 设置 stride 相关字段
+        let priority = 16; // 默认优先级
+        let pass = BIG_STRIDE / priority;
+        let stride = 0;
+        
         // 创建新的任务控制块
         let new_task = Arc::new(TaskControlBlock {
             pid: pid_handle,
@@ -314,6 +344,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    // 添加缺失的 stride 相关字段
+                    stride,
+                    pass,
+                    priority,
                 })
             },
         });

@@ -1,5 +1,6 @@
 //! Process management syscalls
 use alloc::sync::Arc;
+use crate::task::BIG_STRIDE;
 
 use crate::{
     loader::get_app_data_by_name,
@@ -233,10 +234,22 @@ pub fn sys_spawn(path: *const u8) -> isize {
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+        if prio < 2 {
+        return -1; // 优先级必须 >= 2
+    }
+    
+    let prio = prio as usize;
+    let current_task = current_task().unwrap();
+    let mut inner = current_task.inner_exclusive_access();
+    
+    // 更新优先级和步长
+    inner.priority = prio;
+    inner.pass = BIG_STRIDE / prio;
+    
+    prio as isize
 }
