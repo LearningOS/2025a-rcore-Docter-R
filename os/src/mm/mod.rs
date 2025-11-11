@@ -9,7 +9,7 @@
 mod address;
 mod frame_allocator;
 mod heap_allocator;
-mod memory_set;
+pub mod memory_set;
 mod page_table;
 
 use address::VPNRange;
@@ -20,9 +20,8 @@ pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
 use page_table::PTEFlags;
 pub use page_table::{
     translated_byte_buffer, translated_ref, translated_refmut, translated_str, PageTable,
-    PageTableEntry, UserBuffer, UserBufferIterator,
+    PageTableEntry, UserBuffer, UserBufferIterator,translated_and_write
 };
-
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
     heap_allocator::init_heap();

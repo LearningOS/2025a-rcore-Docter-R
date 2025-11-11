@@ -46,10 +46,13 @@ pub mod syscall;
 pub mod task;
 pub mod timer;
 pub mod trap;
+mod loader;
 
 use core::arch::global_asm;
 
 global_asm!(include_str!("entry.asm"));
+global_asm!(include_str!("link_app.S"));
+
 /// clear BSS segment
 fn clear_bss() {
     extern "C" {

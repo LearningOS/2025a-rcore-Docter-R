@@ -26,7 +26,7 @@ use crate::fs::{open_file, OpenFlags};
 use alloc::sync::Arc;
 pub use context::TaskContext;
 use lazy_static::*;
-pub use manager::{fetch_task, TaskManager};
+pub use manager::{fetch_task, TaskManager, sys_mmap_tcb, sys_munmap_tcb};
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
@@ -57,6 +57,8 @@ pub fn suspend_current_and_run_next() {
 
 /// pid of usertests app in make run TEST=1
 pub const IDLE_PID: usize = 0;
+/// 一个适中的大数，避免溢出
+pub const BIG_STRIDE: usize = 0x7FFF_FFFF; 
 
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next(exit_code: i32) {

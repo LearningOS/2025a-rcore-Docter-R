@@ -3,13 +3,19 @@
 use alloc::sync::Arc;
 
 use crate::{
+    loader::get_app_data_by_name,
     fs::{open_file, OpenFlags},
     mm::{translated_refmut, translated_str},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next,sys_mmap_tcb,sys_munmap_tcb,
     },
 };
+use crate::config::{PAGE_SIZE,USER_SPACE_END};
+use crate::timer::get_time_us;
+use crate::mm::PageTable;
+use crate::mm::translated_and_write;
+use crate::task::BIG_STRIDE;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -105,30 +111,87 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    // 1. 为内核空间获取当前任务的根页表
+    let page_table_token = current_user_token();
+    let page_table = PageTable::from_token(page_table_token);
+
+    // 2. 将用户态指针转为虚拟地址（usize），计算 TimeVal 结构体的地址范围
+    let ts_va_start = ts as usize; // TimeVal 起始虚拟地址
+    let ts_va_end = ts_va_start + core::mem::size_of::<TimeVal>(); // 结束虚拟地址（含结构体大小）
+    let current_va = ts_va_start;
+
+    // 3. 读取硬件时间
+    let us = get_time_us();
+    let (sec, usec) = (us / 1_000_000, us % 1_000_000);
+    let time_val = TimeVal { sec, usec };
+    // 将 TimeVal 转为字节数组，方便后续写入物理内存
+    let time_val_bytes = unsafe { core::slice::from_raw_parts(&time_val as *const _ as *const u8, core::mem::size_of::<TimeVal>()) };
+    
+
+    // 4. 遍历 TimeVal 地址范围，按页翻译并写入数据（处理跨页，虽结构体小但兼容通用情况）
+    translated_and_write(current_va, ts_va_end, &page_table, time_val_bytes)
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    // 1. 校验start按页对齐
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+
+    // 2. 校验prot合法性
+    if (prot & !0x7) != 0 || (prot & 0x7) == 0 {
+        return -1;
+    }
+
+    // 3. 计算映射区间
+    let end = start.checked_add(len).unwrap_or(usize::MAX);
+    if start >= USER_SPACE_END || end > USER_SPACE_END {
+        return -1;
+    }
+
+    // 4. 处理len=0的情况
+    if len == 0 {
+        return 0;
+    }
+
+    // 5. 建立映射并验证
+    sys_mmap_tcb(start, len, prot)
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    // 1. 校验start按页对齐
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+
+    // 2. len=0时无实际操作
+    if len == 0 {
+        return 0;
+    }
+
+    // 3. 计算映射区间
+    let end = start.checked_add(len).unwrap_or(usize::MAX);
+    if end > USER_SPACE_END {
+        return -1;
+    }
+
+    // 4. 遍历区域，只取消已存在的有效映射
+    sys_munmap_tcb(start, len)
 }
 
 /// change data segment size
@@ -143,19 +206,48 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let current_task = current_task().unwrap();
+        
+        // 使用 spawn 方法创建新任务
+        let new_task = current_task.spawn(data);
+        let new_pid = new_task.pid.0;
+        
+        // 添加到调度器
+        add_task(new_task);
+        
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+        if prio < 2 {
+        return -1; // 优先级必须 >= 2
+    }
+    
+    let prio = prio as usize;
+    let current_task = current_task().unwrap();
+    let mut inner = current_task.inner_exclusive_access();
+    
+    // 更新优先级和步长
+    inner.priority = prio;
+    inner.pass = BIG_STRIDE / prio;
+    
+    prio as isize
 }

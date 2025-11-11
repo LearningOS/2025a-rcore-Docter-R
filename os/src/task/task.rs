@@ -11,6 +11,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
+use crate::mm::MapPermission;
+use crate::mm::memory_set::MapType; // 添加这行导入
+use crate::task::BIG_STRIDE;
+
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -71,6 +75,14 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// stride 调度算法相关字段
+    /// 步长值、优先级
+    pub stride: usize,    
+    // 步长值  
+    pub pass: usize,        
+    // 优先级
+    pub priority: usize,    
 }
 
 impl TaskControlBlockInner {
@@ -92,6 +104,39 @@ impl TaskControlBlockInner {
         } else {
             self.fd_table.push(None);
             self.fd_table.len() - 1
+        }
+    }
+
+    /// 在当前任务的页表中映射一段虚拟地址区域
+    pub fn sys_mmap_tcb(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        let va_start = VirtAddr::from(start);
+        let va_end = VirtAddr::from(start + len);
+        
+        // 设置权限标志
+        let mut perm = MapPermission::empty();
+        perm.insert(MapPermission::U); // User mode access
+        if (prot & 0x1) != 0 { perm.insert(MapPermission::R); } // Read
+        if (prot & 0x2) != 0 { perm.insert(MapPermission::W); } // Write  
+        if (prot & 0x4) != 0 { perm.insert(MapPermission::X); } // Execute
+        
+        // 通过 MemorySet 的公共接口操作
+        if self.memory_set.mmap(va_start, va_end, MapType::Framed, perm) {
+            0 // 成功
+        } else {
+            -1 // 失败（通常是重叠）
+        }
+    }
+
+    /// 在当前任务的页表中取消映射一段虚拟地址区域
+    pub fn sys_munmap_tcb(&mut self, start: usize, len: usize) -> isize {
+        let va_start = VirtAddr::from(start);
+        let va_end = VirtAddr::from(start + len);
+        
+        // 通过 MemorySet 的公共接口操作
+        if self.memory_set.munmap(va_start, va_end) {
+            0 // 成功
+        } else {
+            -1 // 失败（区域不存在）
         }
     }
 }
@@ -116,27 +161,28 @@ impl TaskControlBlock {
             pid: pid_handle,
             kernel_stack,
             inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
-                    base_size: user_sp,
-                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
-                    memory_set,
-                    parent: None,
-                    children: Vec::new(),
-                    exit_code: 0,
-                    fd_table: vec![
-                        // 0 -> stdin
-                        Some(Arc::new(Stdin)),
-                        // 1 -> stdout
-                        Some(Arc::new(Stdout)),
-                        // 2 -> stderr
-                        Some(Arc::new(Stdout)),
-                    ],
-                    heap_bottom: user_sp,
-                    program_brk: user_sp,
-                })
-            },
+            UPSafeCell::new(TaskControlBlockInner {
+                trap_cx_ppn,
+                base_size: user_sp,
+                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                task_status: TaskStatus::Ready,
+                memory_set,
+                parent: None,
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: vec![
+                    Some(Arc::new(Stdin)),
+                    Some(Arc::new(Stdout)),
+                    Some(Arc::new(Stdout)),
+                ],
+                heap_bottom: user_sp,
+                program_brk: user_sp,
+                // 添加 stride 相关字段
+                stride: 0,
+                pass: BIG_STRIDE / 16, // 默认优先级为16
+                priority: 16,
+            })
+        },
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
@@ -204,20 +250,24 @@ impl TaskControlBlock {
             pid: pid_handle,
             kernel_stack,
             inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
-                    base_size: parent_inner.base_size,
-                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-                    task_status: TaskStatus::Ready,
-                    memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                    fd_table: new_fd_table,
-                    heap_bottom: parent_inner.heap_bottom,
-                    program_brk: parent_inner.program_brk,
-                })
-            },
+            UPSafeCell::new(TaskControlBlockInner {
+                trap_cx_ppn,
+                base_size: parent_inner.base_size,
+                task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                task_status: TaskStatus::Ready,
+                memory_set,
+                parent: Some(Arc::downgrade(self)),
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: new_fd_table,
+                heap_bottom: parent_inner.heap_bottom,
+                program_brk: parent_inner.program_brk,
+                // 添加 stride 相关字段，继承父进程的优先级
+                stride: 0,
+                pass: parent_inner.pass,
+                priority: parent_inner.priority,
+            })
+        },
         });
         // add child
         parent_inner.children.push(task_control_block.clone());
@@ -260,6 +310,92 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+        /// 包装内部的内存映射方法
+    pub fn sys_mmap_tcb(&self, start: usize, len: usize, prot: usize) -> isize {
+        let mut inner = self.inner_exclusive_access();
+        inner.sys_mmap_tcb(start, len, prot)
+    }
+
+    /// 包装内部的内存取消映射方法
+    pub fn sys_munmap_tcb(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner_exclusive_access();
+        inner.sys_munmap_tcb(start, len)
+    }
+
+    /// Spawn a new process from the given elf data
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<TaskControlBlock> {
+        // 创建新的地址空间，并加载 elf_data
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let trap_cx_ppn = memory_set
+            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
+            .unwrap()
+            .ppn();
+        
+        // 分配 PID 和内核栈
+        let pid_handle = pid_alloc();
+        let kernel_stack = kstack_alloc();
+        let kernel_stack_top = kernel_stack.get_top();
+        
+        // 设置 stride 相关字段
+        let priority = 16; // 默认优先级
+        let pass = BIG_STRIDE / priority;
+        let stride = 0;
+        
+        // 创建新的任务控制块
+        let new_task = Arc::new(TaskControlBlock {
+            pid: pid_handle,
+            kernel_stack,
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner {
+                    trap_cx_ppn,
+                    base_size: user_sp,
+                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_status: TaskStatus::Ready,
+                    memory_set,
+                    parent: Some(Arc::downgrade(self)), // 设置父进程为当前任务
+                    children: Vec::new(),
+                    exit_code: 0,
+                    fd_table: vec![
+                        // 0 -> stdin
+                        Some(Arc::new(Stdin)),
+                        // 1 -> stdout  
+                        Some(Arc::new(Stdout)),
+                        // 2 -> stderr
+                        Some(Arc::new(Stdout)),
+                    ], // 添加缺失的 fd_table 初始化
+                    heap_bottom: user_sp,
+                    program_brk: user_sp,
+                    // 添加 stride 相关字段
+                    stride,
+                    pass,
+                    priority,
+                })
+            },
+        });
+        
+        // 准备用户空间的陷阱上下文
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        *trap_cx = TrapContext::app_init_context(
+            entry_point,
+            user_sp,
+            KERNEL_SPACE.exclusive_access().token(),
+            kernel_stack_top,
+            trap_handler as usize,
+        );
+        
+        // 设置子进程返回值为 0
+        trap_cx.x[10] = 0; // a0 寄存器，返回值
+        
+        // 将新任务添加到当前任务的子进程列表中
+        {
+            let mut self_inner = self.inner_exclusive_access();
+            self_inner.children.push(new_task.clone());
+        }
+        
+        // 返回新任务
+        new_task
     }
 }
 
