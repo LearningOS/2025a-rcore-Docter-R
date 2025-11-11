@@ -117,7 +117,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-        // 1. 为内核空间获取当前任务的根页表
+    // 1. 为内核空间获取当前任务的根页表
     let page_table_token = current_user_token();
     let page_table = PageTable::from_token(page_table_token);
 
