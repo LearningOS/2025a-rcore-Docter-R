@@ -397,6 +397,16 @@ impl TaskControlBlock {
         // 返回新任务
         new_task
     }
+
+    /// Get file by file descriptor
+    pub fn get_file(&self, fd: usize) -> Option<Arc<dyn File + Send + Sync>> {
+        let inner = self.inner_exclusive_access();
+        if fd < inner.fd_table.len() {
+            inner.fd_table[fd].clone()
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]

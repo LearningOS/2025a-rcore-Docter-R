@@ -1,9 +1,10 @@
 //! File trait & inode(dir, file, pipe, stdin, stdout)
 
-mod inode;
+pub mod inode;
 mod stdio;
 
 use crate::mm::UserBuffer;
+use core::any::Any;
 
 /// trait File for all file types
 pub trait File: Send + Sync {
@@ -15,6 +16,9 @@ pub trait File: Send + Sync {
     fn read(&self, buf: UserBuffer) -> usize;
     /// write to the file from buf, return the number of bytes written
     fn write(&self, buf: UserBuffer) -> usize;
+
+    /// 添加 as_any 方法用于向下转换
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// The stat of a inode
@@ -31,6 +35,29 @@ pub struct Stat {
     pub nlink: u32,
     /// unused pad
     pad: [u64; 7],
+}
+
+impl Stat {
+    /// 为特殊文件类型创建默认的 Stat 信息
+    pub fn for_special_file() -> Self {
+        Self {
+            dev: 0,
+            ino: 0,
+            mode: StatMode::FILE,
+            nlink: 1,
+            pad: [0; 7],
+        }
+    }
+
+    /// 判断是否是目录
+    pub fn is_dir(&self) -> bool {
+        self.mode.contains(StatMode::DIR)
+    }
+
+    /// 判断是否是文件
+    pub fn is_file(&self) -> bool {
+        self.mode.contains(StatMode::FILE)
+    }
 }
 
 bitflags! {
