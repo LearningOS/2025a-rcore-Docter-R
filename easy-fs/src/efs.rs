@@ -5,6 +5,7 @@ use super::{
 use crate::BLOCK_SZ;
 use alloc::sync::Arc;
 use spin::Mutex;
+use core::mem::size_of;
 ///An easy file system on block
 pub struct EasyFileSystem {
     ///Real device
@@ -147,5 +148,15 @@ impl EasyFileSystem {
             &self.block_device,
             (block_id - self.data_area_start_block) as usize,
         )
+    }
+
+    /// 从块号和块内偏移计算inode编号
+    pub fn get_inode_id(&self, block_id: u32, block_offset: usize) -> u32 {
+        // 计算 inode 在 inode 区域中的索引
+        let inodes_per_block = (BLOCK_SZ / size_of::<DiskInode>()) as u32;
+        let inode_block_index = block_id - self.inode_area_start_block;
+        let inode_index_in_block = block_offset / size_of::<DiskInode>();
+        
+        inode_block_index * inodes_per_block + inode_index_in_block as u32
     }
 }
