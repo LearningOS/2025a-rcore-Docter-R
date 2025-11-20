@@ -156,7 +156,26 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+        
+    // 1. 为内核空间获取当前任务的根页表
+    let page_table_token = current_user_token();
+    let page_table = PageTable::from_token(page_table_token);
+
+    // 2. 将用户态指针转为虚拟地址（usize），计算 TimeVal 结构体的地址范围
+    let ts_va_start = ts as usize; // TimeVal 起始虚拟地址
+    let ts_va_end = ts_va_start + core::mem::size_of::<TimeVal>(); // 结束虚拟地址（含结构体大小）
+    let current_va = ts_va_start;
+
+    // 3. 读取硬件时间
+    let us = get_time_us();
+    let (sec, usec) = (us / 1_000_000, us % 1_000_000);
+    let time_val = TimeVal { sec, usec };
+    // 将 TimeVal 转为字节数组，方便后续写入物理内存
+    let time_val_bytes = unsafe { core::slice::from_raw_parts(&time_val as *const _ as *const u8, core::mem::size_of::<TimeVal>()) };
+    
+
+    // 4. 遍历 TimeVal 地址范围，按页翻译并写入数据（处理跨页，虽结构体小但兼容通用情况）
+    translated_and_write(current_va, ts_va_end, &page_table, time_val_bytes)
 }
 
 /// mmap syscall
