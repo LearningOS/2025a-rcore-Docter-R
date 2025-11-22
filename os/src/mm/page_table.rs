@@ -274,3 +274,45 @@ impl Iterator for UserBufferIterator {
         }
     }
 }
+
+/// Translate and write data from kernel space to user space given the current virtual address, the end virtual address, the page table, and the data to be written.
+pub fn translated_and_write(current: usize, ts_va_end: usize, page_table: &PageTable, time_val_bytes: &[u8]) -> isize {
+    let mut data_offset = 0; // 已写入的字节偏移（处理跨页情况）
+    let mut current_va = current;
+    if current_va >= ts_va_end {
+        return -1; // 无数据写入，直接返回失败
+    }
+    while current_va < ts_va_end {
+    // 1 拆分当前虚拟页：获取虚拟页号（VPN）和页内偏移
+    let va = VirtAddr::from(current_va);
+    let mut vpn = va.floor(); // 当前虚拟页号（向下对齐到页边界）
+    let page_offset = va.page_offset(); // 页内偏移（0 ~ 页大小-1）
+
+    // 2 翻译虚拟页到物理页：检查地址有效性和写权限
+    let pte = match page_table.translate(vpn) {
+        Some(pte) => pte,
+        None => return -1, // 虚拟地址无效，返回失败
+    };
+    if !pte.writable() { // 检查页表项是否有写权限
+        return -1; // 无写权限，返回失败
+    }
+    let ppn = pte.ppn(); // 从页表项中提取物理页号（PPN）
+
+    // 3 计算当前页的写入范围（不超过页边界和结构体结束地址）
+    vpn.step(); // 下一个虚拟页号（当前页的结束边界）
+    let page_end_va: usize = VirtAddr::from(vpn).into(); // 当前页的结束虚拟地址
+    let write_end_va = page_end_va.min(ts_va_end); // 本次写入的结束地址（避免越界）
+    let write_len = write_end_va - current_va; // 本次写入的字节数
+
+    // 4 写入物理内存：通过物理页号获取可变切片，复制数据
+    let physical_page_slice = ppn.get_bytes_array(); // 物理页的可变字节切片（内核需实现该方法）
+    let dest_slice = &mut physical_page_slice[page_offset..page_offset + write_len]; // 目标物理地址范围
+    let src_slice = &time_val_bytes[data_offset..data_offset + write_len]; // 待写入的时间数据片段
+    dest_slice.copy_from_slice(src_slice); // 复制数据到物理内存
+
+    // 5 更新偏移，处理下一页（若有）
+    data_offset += write_len;
+    current_va = write_end_va;
+}
+    0
+}

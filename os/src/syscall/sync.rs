@@ -69,11 +69,42 @@ pub fn sys_mutex_lock(mutex_id: usize) -> isize {
             .tid
     );
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
+    let mut process_inner = process.inner_exclusive_access();
+    
+    // ========== 新增的死锁检测逻辑 ==========
+    if process_inner.deadlock_detect_enabled {
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+        let resource_id = ResourceType::Mutex(mutex_id);
+        
+        // 记录资源请求
+        process_inner.deadlock_detector.record_request(tid, resource_id);
+        
+        // 检查死锁
+        if process_inner.deadlock_detector.check_deadlock(tid, resource_id) {
+            // 检测到死锁，拒绝请求
+            process_inner.deadlock_detector.remove_request(tid, resource_id);
+            return -0xDEAD;  // 返回死锁错误码
+        }
+    }
+    // ========== 死锁检测逻辑结束 ==========
+    
+    // 原有的锁获取逻辑保持不变
     let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
     drop(process_inner);
     drop(process);
     mutex.lock();
+    
+    // ========== 新增的资源分配记录 ==========
+    if process_inner.deadlock_detect_enabled {
+        let process = current_process();
+        let mut process_inner = process.inner_exclusive_access();
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+        let resource_id = ResourceType::Mutex(mutex_id);
+        
+        let _ = process_inner.deadlock_detector.record_allocation(tid, resource_id);
+    }
+    // ========== 资源分配记录结束 ==========
+    
     0
 }
 /// mutex unlock syscall
@@ -94,7 +125,21 @@ pub fn sys_mutex_unlock(mutex_id: usize) -> isize {
     let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
     drop(process_inner);
     drop(process);
+    
+    // 原有的解锁逻辑
     mutex.unlock();
+    
+    // ========== 新增的资源释放记录 ==========
+    if process_inner.deadlock_detect_enabled {
+        let process = current_process();
+        let mut process_inner = process.inner_exclusive_access();
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+        let resource_id = ResourceType::Mutex(mutex_id);
+        
+        let _ = process_inner.deadlock_detector.record_release(tid, resource_id);
+    }
+    // ========== 资源释放记录结束 ==========
+    
     0
 }
 /// semaphore create syscall
@@ -247,5 +292,40 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
 /// YOUR JOB: Implement deadlock detection, but might not all in this syscall
 pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
     trace!("kernel: sys_enable_deadlock_detect NOT IMPLEMENTED");
-    -1
+        let process = current_process();
+    let mut process_inner = process.inner_exclusive_access();
+    
+    if is_enable != 0 && is_enable != 1 {
+        return -1; // 参数不合法
+    }
+    
+    let enable = is_enable == 1;
+    process_inner.deadlock_detect_enabled = enable;
+    
+    // ========== 新增：启用时注册现有资源 ==========
+    if enable {
+        // 注册所有已存在的mutex资源
+        for (id, mutex_opt) in process_inner.mutex_list.iter().enumerate() {
+            if mutex_opt.is_some() {
+                let resource_id = ResourceType::Mutex(id);
+                process_inner.deadlock_detector.register_resource(resource_id, 1);
+            }
+        }
+        
+        // 注册所有已存在的semaphore资源
+        for (id, sem_opt) in process_inner.semaphore_list.iter().enumerate() {
+            if let Some(semaphore) = sem_opt {
+                // 需要获取信号量的当前计数
+                let sem_inner = semaphore.inner.exclusive_access();
+                let resource_id = ResourceType::Semaphore(id);
+                process_inner.deadlock_detector.register_resource(resource_id, sem_inner.count.max(0) as usize);
+                drop(sem_inner);
+            }
+        }
+    }
+    // ========== 资源注册结束 ==========
+    
+    let _ = process_inner.deadlock_detector.set_enabled(enable);
+    
+    0
 }
